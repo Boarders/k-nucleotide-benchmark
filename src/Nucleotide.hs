@@ -29,21 +29,25 @@ import Data.Hashable
 import GHC.Generics
 import Foreign.ForeignPtr (withForeignPtr)
 import Foreign.Storable (peekByteOff)
+import qualified Text.Builder as Builder
+import Data.Foldable (fold)
+
 
 runStdIn = do
-    let skip = do
-            l <- Char8.getLine
-            if Char8.isPrefixOf (Char8.pack ">THREE") l
-                then return ()
-                else skip
-    skip
-    s <- Char8.getContents
-    let content = Char8.map toUpper $ Char8.filter ((/=) '\n') s;
-    mapM_ (execute content) actions
+  let skip = do
+          l <- Char8.getLine
+          if Char8.isPrefixOf (Char8.pack ">THREE") l
+              then return ()
+              else skip
+  skip
+  s <- Char8.getContents
+  let content = Char8.map toUpper $ Char8.filter ((/=) '\n') s;
+  res <- mapM (execute content) actions
+  Builder.putToStdOut (fold res)
 
 
 run :: ByteString -> IO ()
-run bs =
+run bs = do
   let
     (_, rest) = Char8.breakSubstring ">THREE" bs
     seq =
@@ -52,8 +56,9 @@ run bs =
       . Char8.drop 1
       . Char8.dropWhile (/= '\n')
       $ rest
-  in
-    mapM_ (execute seq) actions
+  res <- mapM (execute seq) actions
+  Builder.putToStdOut (fold res)
+
 
 
 data Actions = One | Two | S ByteString
@@ -61,12 +66,12 @@ data Actions = One | Two | S ByteString
 actions
   = [One, Two, S "GGT",S "GGTA",S "GGTATT",S "GGTATTTTAATT",S "GGTATTTTAATTTATAGT"]
 
-execute :: ByteString -> Actions -> IO ()
+execute :: ByteString -> Actions -> IO Builder.Builder
 execute content One   = writeFrequencies1 content
 execute content Two   = writeFrequencies2 content
 execute content (S s) = writeCount content s
 
-writeFrequencies :: ByteString -> Int -> IO ()
+writeFrequencies :: ByteString -> Int -> IO Builder.Builder
 writeFrequencies input size = do
     hm <- tcalculateF input size
     let
@@ -74,13 +79,20 @@ writeFrequencies input size = do
       sorted = sortBy (\(_,x) (_,y) -> y `compare` x) $ coerce . HashMap.toList $ hm
       sum :: Double
       sum = fromIntegral ((Char8.length input) + 1 - size)
-    mapM_ (\(k,v)-> do
-        printf "%s %.3f\n"
-            (Char8.unpack k) ((100 * (fromIntegral v)/sum)::Double)) sorted
-    putChar '\n'
+    let b = foldl' (\acc (k,v)->
+                      let
+                        perc :: Double
+                        perc = 100 * (fromIntegral v)/sum
+                      in
+                          acc
+                       <> Builder.asciiByteString k
+                       <> Builder.char ' '
+                       <> Builder.fixedDouble 3 perc) mempty sorted
+    pure (b <> Builder.char '\n')
 
 
-writeFrequencies1 :: ByteString -> IO ()
+
+writeFrequencies1 :: ByteString -> IO Builder.Builder
 writeFrequencies1 input = do
     hm <- tcalculate1 input
     let
@@ -88,12 +100,19 @@ writeFrequencies1 input = do
       sorted = sortBy (\(_,x) (_,y) -> y `compare` x) $ coerce . HashMap.toList $ hm
       sum :: Double
       sum = fromIntegral (Char8.length input)
-    mapM_ (\(k,v)-> do
-        printf "%s %.3f\n"
-            ( [w2c $ k]) ((100 * (fromIntegral v)/sum)::Double)) sorted
-    putChar '\n'
+    let b = foldl' (\acc (k,v)->
+                      let
+                        perc :: Double
+                        perc = 100 * (fromIntegral v)/sum
+                      in
+                          acc
+                       <> Builder.char (w2c k)
+                       <> Builder.char ' '
+                       <> Builder.fixedDouble 3 perc
+                       <> Builder.char '\n') mempty sorted
+    pure (b <> Builder.char '\n')
 
-writeFrequencies2 :: ByteString -> IO ()
+writeFrequencies2 :: ByteString -> IO Builder.Builder
 writeFrequencies2 input = do
     hm <- tcalculate2 input
     let
@@ -101,20 +120,29 @@ writeFrequencies2 input = do
       sorted = sortBy (\(_,x) (_,y) -> y `compare` x) $ coerce . HashMap.toList $ hm
       sum :: Double
       sum = fromIntegral (Char8.length input)
-    mapM_ (\(k,v)-> do
-        printf "%s %.3f\n"
-            ( showBytes16 $ k) ((100 * (fromIntegral v)/sum)::Double)) sorted
-    putChar '\n'
+    let b = foldl' (\acc (k,v)->
+                      let
+                        perc :: Double
+                        perc = 100 * (fromIntegral v)/sum
+                      in
+                          acc
+                       <> showBytes16 k
+                       <> Builder.char ' '
+                       <> Builder.fixedDouble 3 perc
+                       <> Builder.char '\n') mempty sorted
+    pure (b <> Builder.char '\n')
 
 
-writeCount :: Char8.ByteString -> ByteString -> IO ()
+writeCount :: Char8.ByteString -> ByteString -> IO Builder.Builder
 writeCount input string = do
     let size = Char8.length string
     hm <- tcalculate input size
     let
       v :: Int
       v = maybe 0 id $ HashMap.lookup (coerce string) hm
-    printf "%d\t%s\n" v (Text.decodeUtf8 string)
+    let b = Builder.unsignedDecimal v <> Builder.char '\t' <> Builder.asciiByteString string
+    pure (b <> Builder.char '\n')
+--    printf "%d\t%s\n" v (Text.decodeUtf8 string)
 
 tcalculate :: Char8.ByteString -> Int -> IO (HashMap Char8.ByteString Int)
 tcalculate input size = do
@@ -275,21 +303,21 @@ calculateF input beg size incr = do
     freqmap' <- calculate' freqmap beg
     traverse readIORef freqmap'
 
-showBytes16 :: Word16 -> Text
-showBytes16 16705 =   "AA"
-showBytes16 16724 =   "TA"
-showBytes16 21569 =   "AT"
-showBytes16 21588 =   "TT"
-showBytes16 16707 =   "CA"
-showBytes16 17217 =   "AC"
-showBytes16 18241 =   "AG"
-showBytes16 16711 =   "GA"
-showBytes16 21571 =   "CT"
-showBytes16 17236 =   "TC"
-showBytes16 21575 =   "GT"
-showBytes16 18260 =   "TG"
-showBytes16 17219 =   "CC"
-showBytes16 17223 =   "GC"
-showBytes16 18243 =   "CG"
-showBytes16 18247 =   "GG"
+showBytes16 :: Word16 -> Builder.Builder
+showBytes16 16705 = Builder.text   "AA"
+showBytes16 16724 = Builder.text   "TA"
+showBytes16 21569 = Builder.text   "AT"
+showBytes16 21588 = Builder.text   "TT"
+showBytes16 16707 = Builder.text   "CA"
+showBytes16 17217 = Builder.text   "AC"
+showBytes16 18241 = Builder.text   "AG"
+showBytes16 16711 = Builder.text   "GA"
+showBytes16 21571 = Builder.text   "CT"
+showBytes16 17236 = Builder.text   "TC"
+showBytes16 21575 = Builder.text   "GT"
+showBytes16 18260 = Builder.text   "TG"
+showBytes16 17219 = Builder.text   "CC"
+showBytes16 17223 = Builder.text   "GC"
+showBytes16 18243 = Builder.text   "CG"
+showBytes16 18247 = Builder.text   "GG"
 showBytes16 n = error $ "showBytes16: encoutered " ++ (show $ n)
