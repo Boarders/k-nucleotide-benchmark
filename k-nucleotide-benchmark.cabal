@@ -32,6 +32,7 @@ executable knb
   build-depends:
       base
     , Nucleotide
+    , bytestring
 
 
 extra-source-files:
@@ -54,6 +55,7 @@ Library Nucleotide
 
   exposed-modules:
     NucleotideOld
+    Nucleotide
 
   other-modules:
 
@@ -85,5 +87,6 @@ benchmark bench
     , base
     , criterion
     , Nucleotide
+    , bytestring
 
   other-modules:
