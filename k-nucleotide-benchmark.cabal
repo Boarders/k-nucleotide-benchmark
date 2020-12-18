@@ -1,10 +1,8 @@
 cabal-version:      3.0
 category:           Control
 build-type:         Simple
-
 name:               k-nucleotide-benchmark
 version:            0.1.0
-
 author:             Callan McGill
 maintainer:         callan.mcgill@gmail.com
 copyright:          2020
@@ -12,83 +10,47 @@ license:            BSD-3-Clause
 
 executable knb
   default-language: Haskell2010
-
-  main-is:
-    Main.hs
-
+  main-is:          Main.hs
   ghc-options:
-    -threaded
-    -rtsopts
-    -O2
-    -with-rtsopts=-T
-    -Wall
-    -Wincomplete-patterns
-    -rtsopts
+    -threaded -rtsopts -Wall -Wincomplete-patterns -rtsopts
     -with-rtsopts=-N
 
-  hs-source-dirs:
-    app/
-
+  hs-source-dirs:   app/
   build-depends:
-      base
-    , Nucleotide
+    , base
     , bytestring
-
+    , Nucleotide
 
 extra-source-files:
 
-Library Nucleotide
-
-  hs-source-dirs:
-    src
-
-  ghc-options:
-    -Wall
-    -fllvm
-    -O2
-
+library Nucleotide
+  hs-source-dirs:   src
+  ghc-options:      -Wall
   build-depends:
-      base
+    , base
     , bytestring
-    , hashtables
     , containers
-    , unordered-containers
+    , hashtables
     , text
+    , unordered-containers
 
   exposed-modules:
-    NucleotideOld
     Nucleotide
+    NucleotideOld
 
   other-modules:
-
   default-language: Haskell2010
 
 benchmark bench
-
-  default-language:
-    Haskell2010
-
-  main-is:
-    Bench.hs
-
-  type:
-    exitcode-stdio-1.0
-
-  ghc-options:
-    -threaded
-    -rtsopts
-    -O2
-    -Wall
-    -Wincomplete-patterns
-
-
-  hs-source-dirs:
-    bench
-
+  default-language: Haskell2010
+  main-is:          Bench.hs
+  type:             exitcode-stdio-1.0
+  ghc-options:      -threaded -rtsopts -Wall -Wincomplete-patterns
+  hs-source-dirs:   bench
   build-depends:
     , base
+    , bytestring
     , criterion
     , Nucleotide
-    , bytestring
 
   other-modules:
