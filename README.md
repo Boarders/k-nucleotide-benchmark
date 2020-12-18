@@ -2,5 +2,5 @@
 
 Run on input as so:
 ```
-cabal run knb < input/nucleo.txt
+cabal run knb < input/small.fasta
 ```
