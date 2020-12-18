@@ -52,6 +52,8 @@ Library Nucleotide
     , bytestring
     , hashtables
     , containers
+    , unordered-containers
+    , text
 
   exposed-modules:
     NucleotideOld

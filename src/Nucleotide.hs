@@ -1,5 +1,6 @@
 {-# language ScopedTypeVariables #-}
-{-# language OverloadedStrings #-}
+{-# language OverloadedStrings   #-}
+{-# language BangPatterns        #-}
 module Nucleotide where
 
 import qualified Data.ByteString.Char8 as ByteString
@@ -12,6 +13,11 @@ import Data.Maybe
 import Data.Char
 import Data.IORef
 import Control.Concurrent
+import qualified Data.HashMap.Strict as HashMap
+import Data.HashMap.Strict (HashMap)
+import qualified Data.Text as Text
+import qualified Data.Text.Encoding as Text
+
 
 runStdIn = do
     let skip = do
@@ -37,22 +43,23 @@ run bs =
       $ rest
   in
     mapM_ (execute seq) actions
-  
 
-data Actions = I Int | S String
-actions = [I 1,I 2,
-           S "GGT",S "GGTA",S "GGTATT",S "GGTATTTTAATT",S "GGTATTTTAATTTATAGT"]
 
-execute :: ByteString -> Actions -> IO ()        
+data Actions = I Int | S ByteString
+
+actions
+  = [I 1, I 2, S "GGT",S "GGTA",S "GGTATT",S "GGTATTTTAATT",S "GGTATTTTAATTTATAGT"]
+
+execute :: ByteString -> Actions -> IO ()
 execute content (I i) = writeFrequencies content i
 execute content (S s) = writeCount content s
 
 writeFrequencies :: ByteString.ByteString -> Int -> IO ()
 writeFrequencies input size = do
-    mp <- tcalculate input size
+    hm <- tcalculate input size
     let
       sorted :: [(ByteString, Int)]
-      sorted = sortBy (\(_,x) (_,y) -> y `compare` x) $ M.toList mp
+      sorted = sortBy (\(_,x) (_,y) -> y `compare` x) $ HashMap.toList hm
       sum :: Double
       sum = fromIntegral ((ByteString.length input) + 1 - size)
     mapM_ (\(k,v)-> do
@@ -60,61 +67,56 @@ writeFrequencies input size = do
             (ByteString.unpack k) ((100 * (fromIntegral v)/sum)::Double)) sorted
     putChar '\n'
 
-writeCount :: ByteString.ByteString -> String -> IO ()
+writeCount :: ByteString.ByteString -> ByteString -> IO ()
 writeCount input string = do
-    let size = length string
-    mp <- tcalculate input size
+    let size = ByteString.length string
+    hm <- tcalculate input size
     let
       v :: Int
-      v = maybe 0 id $ M.lookup (ByteString.pack string) mp
-    printf "%d\t%s\n" v string
+      v = maybe 0 id $ HashMap.lookup string hm
+    printf "%d\t%s\n" v (Text.decodeUtf8 string)
 
-tcalculate :: ByteString.ByteString -> Int -> IO (M.Map ByteString.ByteString Int)
+tcalculate :: ByteString.ByteString -> Int -> IO (HashMap ByteString.ByteString Int)
 tcalculate input size = do
     let
-        l = [0..63]
-        actions = map (\i -> calculate input i size (length l)) l
+      actions = map (\i -> calculate input i size 64) [0..63]
     vars <- mapM (\action -> do
                     var <- newEmptyMVar
                     forkIO $ do
                         answer <- action
                         putMVar var answer
                     return var) actions
-    let result = M.empty
-    results <- mapM takeMVar vars
-    return $ foldl (\res m -> foldl
-                               (\m (k,v)->M.insertWith (+) k v m)
-                                res m)
-                   result results
+    let result = HashMap.empty
 
-calculate :: ByteString.ByteString -> Int -> Int -> Int -> IO [(ByteString.ByteString,Int)]
+    results :: [HashMap ByteString Int] <- mapM takeMVar vars
+    return
+      $ foldl' (\acc hm -> HashMap.unionWith (+) acc hm) HashMap.empty results
+
+
+calculate :: ByteString.ByteString -> Int -> Int -> Int -> IO (HashMap ByteString.ByteString Int)
 calculate input beg size incr = do
     let
       updateMap
-        :: HashTable ByteString.ByteString (IORef Int)
+        :: HashMap ByteString.ByteString (IORef Int)
         -> ByteString.ByteString
-        -> IO (HashTable ByteString.ByteString (IORef Int))
-      updateMap freqmap word = do
-           lu <- HashTable.lookup freqmap word
-           case lu of
-            Nothing -> do
-                ref <- newIORef 1
-                HashTable.insert freqmap word ref
-            Just x -> modifyIORef' x (+1)
-           return freqmap
-      word :: ByteString -> Int -> ByteString
-      word inp pos = ByteString.take size $ ByteString.drop pos inp
-      calculate' :: HashTable ByteString (IORef Int) -> Int -> IO ()
+        -> IO (HashMap ByteString.ByteString (IORef Int))
+      updateMap freqmap word =
+           case HashMap.lookup word freqmap of
+              Nothing -> do
+                !ref <- newIORef 1
+                let freqmap' = HashMap.insert word ref freqmap
+                pure freqmap'
+              Just x -> modifyIORef' x (+1) >> pure freqmap
+      word inp pos = ByteString.take size . ByteString.drop pos $ inp
+      calculate' :: HashMap ByteString (IORef Int) -> Int -> IO (HashMap ByteString (IORef Int))
       calculate' freqmap i
-            | i >= ((ByteString.length input)+1 - size) = return ()
+            | i >= ((ByteString.length input)+1 - size) = return freqmap
             | otherwise = do
                 ht <- updateMap freqmap $ word input i
                 calculate' ht (i+incr)
-    freqmap <- HashTable.new :: IO (HashTable ByteString.ByteString (IORef Int))
-    calculate' freqmap beg
-    lst <- HashTable.toList freqmap
-    mapM (\(x,y)-> do
-            v <- readIORef y
-            return (x,v)) lst
+    let freqmap = HashMap.empty
+    freqmap' <- calculate' freqmap beg
+    traverse readIORef freqmap'
+
 
 type HashTable k v = HashTable.BasicHashTable k v
