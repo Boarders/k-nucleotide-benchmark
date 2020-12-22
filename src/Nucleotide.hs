@@ -4,9 +4,11 @@
 {-# LANGUAGE DerivingStrategies         #-}
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MagicHash                  #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE TypeApplications           #-}
+{-# LANGUAGE UnboxedTuples              #-}
 module Nucleotide (runStdIn) where
 
 import qualified Control.Concurrent.ParallelIO.Global as ParallelIO
@@ -24,10 +26,14 @@ import           Data.IORef
 import           Data.List                            (foldl')
 import qualified Data.Vector                          as Vector
 import qualified Data.Vector.Algorithms.Intro         as Sort
+import           Data.Vector.Fusion.Stream.Monadic    (Step (..), Stream (..))
+import qualified Data.Vector.Fusion.Stream.Monadic    as Stream
 import qualified Data.Vector.Storable                 as Storable
-import           GHC.Generics
+import           Foreign.Ptr                          (castPtr, plusPtr)
+import           Foreign.Storable                     (peek)
 import           GHC.Word
 import qualified Text.Builder                         as Builder
+
 
 
 runStdIn :: IO ()
@@ -44,16 +50,16 @@ runStdIn = do
   let
     content =
      -- Remove newlines and only keep the second and third
-     -- bit of each character.
+     -- bit of each character as in many of the faster solutions.
         Storable.map (\b -> (b .&. 0b110) `shiftR` 1)
       . Storable.filter (/= 10) $ sv
-  -- return results in parallel
+  -- return results in parallel.
   results <- ParallelIO.parallel (actions content)
-  -- Put builder results to stdout
+  -- Put builder results to stdout.
   Builder.putToStdOut (foldl' (<>) mempty results)
 
 {-# inline actions #-}
--- Task to be run
+-- Tasks to be run in parallel.
 actions :: Storable.Vector Word8 -> [IO Builder.Builder]
 actions content =
   [ writeFrequencies1 content
@@ -65,7 +71,7 @@ actions content =
   , writeCount content "GGTATTTTAATTTATAGT"
   ]
 
--- Write the one-letter frequences into builder.
+-- Write the one-letter frequences into text builder.
 writeFrequencies1 :: Storable.Vector Word8 -> IO Builder.Builder
 writeFrequencies1 input = do
     hm <- calculate1B input
@@ -87,11 +93,10 @@ writeFrequencies1 input = do
                        <> Builder.char '\n') mempty sorted
     pure (b <> Builder.char '\n')
 
--- Write the two-letter frequencies into builder.
+-- Write the two-letter frequencies into text builder.
 writeFrequencies2 :: Storable.Vector Word8 -> IO Builder.Builder
 writeFrequencies2 input = do
-                    -- cast from Vector Word8 to Vector Word16
-    hm <- calculate2B (Storable.unsafeCast input)
+    hm <- calculate2B input
     mv <- Vector.unsafeThaw . Vector.fromList . HashMap.toList $ hm
     Sort.sortBy (\(_,x) (_,y) -> y `compare` x) mv
     sorted :: Vector.Vector (Word16, Int)  <- Vector.unsafeFreeze $ mv
@@ -110,7 +115,7 @@ writeFrequencies2 input = do
                        <> Builder.char '\n') mempty  sorted
     pure (b <> Builder.char '\n')
 
--- Convert byte back to letter
+-- Convert byte back to letter.
 decode :: Word8 -> Char
 decode 0 = 'A'
 decode 1 = 'C'
@@ -138,7 +143,7 @@ decode16 0b0000001100000010 = Builder.text "GT"
 decode16 0b0000001100000011 = Builder.text "GG"
 decode16 n                  = error $ "decode16: unexpected bits: " <> show n
 
--- Compute hashmap of character occurences.
+-- Compute hashmap of single character occurences
 calculate1B :: Storable.Vector Word8 -> IO (HashMap Word8 Int)
 calculate1B input = Storable.foldM' updateMap HashMap.empty input >>= traverse readIORef
   where
@@ -158,11 +163,11 @@ calculate1B input = Storable.foldM' updateMap HashMap.empty input >>= traverse r
                 pure freqmap'
                    -- Mutate reference over copying hashmap on insert.
             Just x -> modifyIORef' x (+1) >> pure freqmap
-
-
 -- Compute hashmap of two-character occurences.
-calculate2B :: Storable.Vector Word16 -> IO (HashMap Word16 Int)
-calculate2B input = Storable.foldM' updateMap HashMap.empty input >>= traverse readIORef
+
+calculate2B :: Storable.Vector Word8 -> IO (HashMap Word16 Int)
+calculate2B input =
+    fold16M' updateMap HashMap.empty input >>= traverse readIORef
   where
     updateMap
       :: HashMap Word16 (IORef Int)
@@ -200,36 +205,34 @@ writeCount input string = do
 tcalculate :: Storable.Vector Word8 -> Int -> IO (HashMap Incremental Int)
 tcalculate input size = do
     let
-      computeHashMaps = map (\i -> calculate input i size 96) [0..95]
+      computeHashMaps = map (\i -> calculate input i size 64) [0..63]
     results <- ParallelIO.parallel computeHashMaps
     return
       $ foldl' (\ !acc !hm -> HashMap.unionWith (+) acc hm) HashMap.empty results
 
 -- Compute hashmap from given beginning point with the given increment.
 calculate :: Storable.Vector Word8 -> Int -> Int -> Int -> IO (HashMap Incremental Int)
-calculate input !beg !size !incr = do
-    let
-      updateMap
-        :: HashMap Incremental (IORef Int)
-        -> Incremental
-        -> IO (HashMap Incremental (IORef Int))
-      updateMap freqmap word =
-           case HashMap.lookup word freqmap of
-              Nothing -> do
-                ref <- newIORef 1
-                let freqmap' = Internal.insertNewKey (fromIntegral (hash word)) word ref freqmap
-                pure freqmap'
-              Just x -> modifyIORef' x (+1) >> pure freqmap
-      calculate' :: HashMap Incremental (IORef Int) -> Int -> IO (HashMap Incremental (IORef Int))
-      calculate' freqmap i
-            | i >= ((Storable.length input)+1 - size) = return freqmap
-            | otherwise = do
-                ht <- updateMap freqmap $ coerce (Storable.unsafeSlice i size input)
-                calculate' ht (i+incr)
-    freqmap' <- calculate' HashMap.empty beg
-    traverse readIORef freqmap'
+calculate input !beg !size !incr =
+    Stream.foldM' updateHashMap HashMap.empty (fromVectorWithInc beg size incr end input) >>=
+    traverse readIORef
+  where
+    end = Storable.length input + 1 - size
+    updateHashMap
+      :: HashMap Incremental (IORef Int)
+      -> Incremental
+      -> IO (HashMap Incremental (IORef Int))
+    updateHashMap freqmap slice =
+         case HashMap.lookup slice freqmap of
+            Nothing -> do
+              ref <- newIORef 1
+              let
+                freqmap'
+                    = Internal.insertNewKey (fromIntegral (hash slice)) slice ref freqmap
+              pure freqmap'
+            Just x -> modifyIORef' x (+1) >> pure freqmap
 
-newtype Incremental = Incremental {getIncremental :: Storable.Vector Word8}
+
+newtype Incremental = Incremental (Storable.Vector Word8)
   deriving newtype Eq
 
 -- Use a custom hashable instance using the bit values we
@@ -248,3 +251,36 @@ byteStringToVector :: ByteString -> Storable.Vector Word8
 byteStringToVector bs = vec where
     vec = Storable.unsafeFromForeignPtr fptr off len
     (fptr, off, len) = toForeignPtr bs
+
+
+fold16M' :: (a -> Word16 -> IO a) -> a -> Storable.Vector Word8 -> IO a
+fold16M' f v vec = do
+     Storable.unsafeWith vec $ \ptr -> go v ptr (ptr `plusPtr` (len - 1))
+  where
+    len = Storable.length vec
+        -- tail recursive; traverses array left to right
+    go !z !p end | p == end = return z
+                 | otherwise =
+                     do
+                       x <- peek (castPtr @_ @Word16 p)
+                       z' <- f z x
+                       go z' (p `plusPtr` 1) end
+--{-# INLINE fold16M' #-}
+
+
+
+{-# inline fromVectorWithInc #-}
+fromVectorWithInc
+  :: forall m . (Monad m)
+  => Int
+  -> Int
+  -> Int
+  -> Int
+  -> Storable.Vector Word8
+  -> Stream m Incremental
+fromVectorWithInc beg size inc end v = Stream step beg
+  where
+    {-# INLINE step #-}
+    step :: Int -> m (Step Int Incremental)
+    step !i | i >= end = return Done
+            | otherwise = return $ Yield (coerce (Storable.unsafeSlice i size v)) (i+inc)
