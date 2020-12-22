@@ -205,7 +205,7 @@ writeCount input string = do
 tcalculate :: Storable.Vector Word8 -> Int -> IO (HashMap Incremental Int)
 tcalculate input size = do
     let
-      computeHashMaps = map (\i -> calculate input i size 64) [0..63]
+      computeHashMaps = map (\i -> calculate input i size 96) [0..63]
     results <- ParallelIO.parallel computeHashMaps
     return
       $ foldl' (\ !acc !hm -> HashMap.unionWith (+) acc hm) HashMap.empty results
