@@ -25,6 +25,8 @@ executable knb
     -Wincomplete-patterns
     -rtsopts
     -with-rtsopts=-N
+    -fllvm
+    -eventlog
 
   hs-source-dirs:
     app/
@@ -46,6 +48,9 @@ Library Nucleotide
     -Wall
     -fllvm
     -O2
+    -eventlog
+    -fspec-constr
+
 
   build-depends:
       base
@@ -54,10 +59,16 @@ Library Nucleotide
     , containers
     , unordered-containers
     , text
+    , parallel-io
+    , hashable
+    , text-builder
+    , vector
+    , vector-algorithms
 
   exposed-modules:
     NucleotideOld
     Nucleotide
+    NucleotideVector
 
   other-modules:
 
