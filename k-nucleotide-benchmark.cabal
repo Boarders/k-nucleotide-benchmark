@@ -58,12 +58,13 @@ Library Nucleotide
     , hashtables
     , containers
     , unordered-containers
-    , text
+--    , text
     , parallel-io
     , hashable
     , text-builder
     , vector
     , vector-algorithms
+    , pvar
 
   exposed-modules:
     NucleotideOld

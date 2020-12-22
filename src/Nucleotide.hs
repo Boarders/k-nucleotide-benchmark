@@ -1,14 +1,11 @@
 {-# LANGUAGE BangPatterns               #-}
 {-# LANGUAGE BinaryLiterals             #-}
-{-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE DerivingStrategies         #-}
-{-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE MagicHash                  #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE TypeApplications           #-}
-{-# LANGUAGE UnboxedTuples              #-}
+
 module Nucleotide (runStdIn) where
 
 import qualified Control.Concurrent.ParallelIO.Global as ParallelIO
@@ -22,18 +19,16 @@ import           Data.Hashable
 import qualified Data.HashMap.Internal                as Internal
 import           Data.HashMap.Strict                  (HashMap)
 import qualified Data.HashMap.Strict                  as HashMap
-import           Data.IORef
 import           Data.List                            (foldl')
+import           Data.Primitive.PVar
 import qualified Data.Vector                          as Vector
 import qualified Data.Vector.Algorithms.Intro         as Sort
 import           Data.Vector.Fusion.Stream.Monadic    (Step (..), Stream (..))
 import qualified Data.Vector.Fusion.Stream.Monadic    as Stream
 import qualified Data.Vector.Storable                 as Storable
 import           Foreign.Ptr                          (castPtr, plusPtr)
-import           Foreign.Storable                     (peek)
 import           GHC.Word
 import qualified Text.Builder                         as Builder
-
 
 
 runStdIn :: IO ()
@@ -143,47 +138,49 @@ decode16 0b0000001100000010 = Builder.text "GT"
 decode16 0b0000001100000011 = Builder.text "GG"
 decode16 n                  = error $ "decode16: unexpected bits: " <> show n
 
+
 -- Compute hashmap of single character occurences
 calculate1B :: Storable.Vector Word8 -> IO (HashMap Word8 Int)
-calculate1B input = Storable.foldM' updateMap HashMap.empty input >>= traverse readIORef
+calculate1B input = Storable.foldM' updateMap HashMap.empty input >>= traverse readPVar
   where
     updateMap
-      :: HashMap Word8 (IORef Int)
+      :: HashMap Word8 (PVar Int RW)
       -> Word8
-      -> IO (HashMap Word8 (IORef Int))
+      -> IO (HashMap Word8 (PVar Int RW))
     updateMap freqmap word =
          case HashMap.lookup word freqmap of
             Nothing ->
               do
-                ref <- newIORef 1
+                ref <- newPVar 1
                 let
                   freqmap'
                   -- Use insertNewKey as we know key is not present
                       = Internal.insertNewKey (fromIntegral word) word ref freqmap
                 pure freqmap'
                    -- Mutate reference over copying hashmap on insert.
-            Just x -> modifyIORef' x (+1) >> pure freqmap
--- Compute hashmap of two-character occurences.
+            Just x -> modifyPVar_ x (+1) >> pure freqmap
 
+
+-- Compute hashmap of two-character occurences.
 calculate2B :: Storable.Vector Word8 -> IO (HashMap Word16 Int)
-calculate2B input =
-    fold16M' updateMap HashMap.empty input >>= traverse readIORef
+calculate2B input = fold16M updateMap HashMap.empty input >>= traverse readPVar
   where
     updateMap
-      :: HashMap Word16 (IORef Int)
+      :: HashMap Word16 (PVar Int RW)
       -> Word16
-      -> IO (HashMap Word16 (IORef Int))
-    updateMap freqmap word16 =
-         case HashMap.lookup word16 freqmap of
+      -> IO (HashMap Word16 (PVar Int RW))
+    updateMap freqmap word =
+         case HashMap.lookup word freqmap of
             Nothing ->
               do
-                ref <- newIORef 1
+                ref <- newPVar 1
                 let
-                  freqmap' =
-                    Internal.insertNewKey (fromIntegral word16) word16 ref freqmap
+                  freqmap'
+                  -- Use insertNewKey as we know key is not present
+                      = Internal.insertNewKey (fromIntegral word) word ref freqmap
                 pure freqmap'
-            Just x -> modifyIORef' x (+1) >> pure freqmap
-
+                   -- Mutate reference over copying hashmap on insert.
+            Just x -> modifyPVar_ x (+1) >> pure freqmap
 
 
 {-# INLINE writeCount #-}
@@ -205,31 +202,31 @@ writeCount input string = do
 tcalculate :: Storable.Vector Word8 -> Int -> IO (HashMap Incremental Int)
 tcalculate input size = do
     let
-      computeHashMaps = map (\i -> calculate input i size 96) [0..63]
+      computeHashMaps = map (\i -> calculate input i size 64) [0..63]
     results <- ParallelIO.parallel computeHashMaps
     return
-      $ foldl' (\ !acc !hm -> HashMap.unionWith (+) acc hm) HashMap.empty results
+      $ foldl' (\ acc hm -> HashMap.unionWith (+) acc hm) HashMap.empty results
 
 -- Compute hashmap from given beginning point with the given increment.
 calculate :: Storable.Vector Word8 -> Int -> Int -> Int -> IO (HashMap Incremental Int)
 calculate input !beg !size !incr =
     Stream.foldM' updateHashMap HashMap.empty (fromVectorWithInc beg size incr end input) >>=
-    traverse readIORef
+    traverse readPVar
   where
     end = Storable.length input + 1 - size
     updateHashMap
-      :: HashMap Incremental (IORef Int)
+      :: HashMap Incremental (PVar Int RW)
       -> Incremental
-      -> IO (HashMap Incremental (IORef Int))
+      -> IO (HashMap Incremental (PVar Int RW))
     updateHashMap freqmap slice =
          case HashMap.lookup slice freqmap of
             Nothing -> do
-              ref <- newIORef 1
+              ref <- newPVar 1
               let
                 freqmap'
                     = Internal.insertNewKey (fromIntegral (hash slice)) slice ref freqmap
               pure freqmap'
-            Just x -> modifyIORef' x (+1) >> pure freqmap
+            Just x -> modifyPVar_ x (+1) >> pure freqmap
 
 
 newtype Incremental = Incremental (Storable.Vector Word8)
@@ -243,7 +240,7 @@ instance Hashable Incremental where
     (\ acc w -> (acc `shiftL` 2) .|. (fromIntegral w))
     0
     v
-  hashWithSalt _ = hash
+  hashWithSalt _ = error "hashWithSalt not implemented."
 
 -- Convert a bytestring to a storable vector without copying.
 -- Taken from: bytestring-to-vector package
@@ -253,19 +250,18 @@ byteStringToVector bs = vec where
     (fptr, off, len) = toForeignPtr bs
 
 
-fold16M' :: (a -> Word16 -> IO a) -> a -> Storable.Vector Word8 -> IO a
-fold16M' f v vec = do
+fold16M :: (a -> Word16 -> IO a) -> a -> Storable.Vector Word8 -> IO a
+fold16M f v vec = do
      Storable.unsafeWith vec $ \ptr -> go v ptr (ptr `plusPtr` (len - 1))
   where
     len = Storable.length vec
         -- tail recursive; traverses array left to right
     go !z !p end | p == end = return z
-                 | otherwise =
-                     do
-                       x <- peek (castPtr @_ @Word16 p)
-                       z' <- f z x
-                       go z' (p `plusPtr` 1) end
---{-# INLINE fold16M' #-}
+                  | otherwise =
+                    do
+                      x <- peek (castPtr @_ @Word16 p)
+                      z' <- f z x
+                      go z' (p `plusPtr` 1) end
 
 
 
