@@ -32,21 +32,21 @@ import qualified Text.Builder                         as Builder
 
 runStdIn :: IO ()
 runStdIn = do
-  let skip = do
-          l <- ByteString.getLine
-          if Char8.isPrefixOf ">THREE" l
-              then return ()
-              else skip
+  let
+    skip = do
+      l <- ByteString.getLine
+      if Char8.isPrefixOf ">THREE" l
+          then return ()
+          else skip
   skip
   s <- ByteString.getContents
   let sv = byteStringToVector s
-
   let
-    {-# INLINE content #-}
     content = Storable.map (\b -> (b .&. 0b110) `shiftR` 1) . Storable.filter (/= 10) $ sv
   results <- ParallelIO.parallel (actions content)
   Builder.putToStdOut (foldl' (<>) mempty results)
 
+{-# inline actions #-}
 actions :: Storable.Vector Word8 -> [IO Builder.Builder]
 actions content =
   [ writeFrequencies1 content
@@ -57,7 +57,6 @@ actions content =
   , writeCount content "GGTATTTTAATT"
   , writeCount content "GGTATTTTAATTTATAGT"
   ]
-
 
 writeFrequencies1 :: Storable.Vector Word8 -> IO Builder.Builder
 writeFrequencies1 input = do
@@ -106,6 +105,24 @@ writeFrequencies2 input = do
                        <> Builder.char '\n') mempty  sorted
     pure (b <> Builder.char '\n')
 
+
+decode :: Word8 -> Char
+decode 0 = 'A'
+decode 1 = 'C'
+decode 2 = 'T'
+decode 3 = 'G'
+decode _ = error "decode: encountered unexpected byte"
+
+
+newtype Byte = Byte {getByte :: Word8}
+  deriving stock Generic
+  deriving newtype (Eq, Show)
+
+
+instance Hashable Byte where
+  hash (Byte b) = (fromIntegral b)
+
+
 calculate1B :: Storable.Vector Word8 -> IO (HashMap Byte Int)
 calculate1B input = Storable.foldM' updateMap HashMap.empty input >>= traverse readIORef
   where
@@ -128,40 +145,13 @@ calculate1B input = Storable.foldM' updateMap HashMap.empty input >>= traverse r
             Just x -> modifyIORef' x (+1) >> pure freqmap
 
 
-newtype Byte = Byte {getByte :: Word8}
+
+newtype Byte2 = Byte2 {getByte2 :: Word16}
   deriving stock Generic
   deriving newtype (Eq, Show)
 
-
-instance Hashable Byte where
-  hash (Byte b) = (fromIntegral b)-- .&. 0b110
-
-decode :: Word8 -> Char
-decode 0 = 'A'
-decode 1 = 'C'
-decode 2 = 'T'
-decode 3 = 'G'
-decode _ = error "decode: encountered unexpected byte"
-
-decode16 :: Word16 -> Builder.Builder
-decode16 0b0000000000000000 = Builder.text "AA"
-decode16 0b0000000000000001 = Builder.text "AC"
-decode16 0b0000000000000010 = Builder.text "AT"
-decode16 0b0000000000000011 = Builder.text "AG"
-decode16 0b0000000100000000 = Builder.text "CA"
-decode16 0b0000000100000001 = Builder.text "CC"
-decode16 0b0000000100000010 = Builder.text "CT"
-decode16 0b0000000100000011 = Builder.text "CG"
-decode16 0b0000001000000000 = Builder.text "TA"
-decode16 0b0000001000000001 = Builder.text "TC"
-decode16 0b0000001000000010 = Builder.text "TT"
-decode16 0b0000001000000011 = Builder.text "TG"
-decode16 0b0000001100000000 = Builder.text "GA"
-decode16 0b0000001100000001 = Builder.text "GC"
-decode16 0b0000001100000010 = Builder.text "GT"
-decode16 0b0000001100000011 = Builder.text "GG"
-decode16 n                  = error $ "unexpected bits: " <> show n
-
+instance Hashable Byte2 where
+  hash (Byte2 b) = (fromIntegral b)
 
 calculate2B :: Storable.Vector Word16 -> IO (HashMap Byte2 Int)
 calculate2B input = Storable.foldM' updateMap HashMap.empty input >>= traverse readIORef
@@ -182,14 +172,24 @@ calculate2B input = Storable.foldM' updateMap HashMap.empty input >>= traverse r
                 pure freqmap'
             Just x -> modifyIORef' x (+1) >> pure freqmap
 
-newtype Byte2 = Byte2 {getByte2 :: Word16}
-  deriving stock Generic
-  deriving newtype (Eq, Show)
-
-
-instance Hashable Byte2 where
-  hash (Byte2 b) = (fromIntegral b)-- .&. 0b11000000110
-
+decode16 :: Word16 -> Builder.Builder
+decode16 0b0000000000000000 = Builder.text "AA"
+decode16 0b0000000000000001 = Builder.text "AC"
+decode16 0b0000000000000010 = Builder.text "AT"
+decode16 0b0000000000000011 = Builder.text "AG"
+decode16 0b0000000100000000 = Builder.text "CA"
+decode16 0b0000000100000001 = Builder.text "CC"
+decode16 0b0000000100000010 = Builder.text "CT"
+decode16 0b0000000100000011 = Builder.text "CG"
+decode16 0b0000001000000000 = Builder.text "TA"
+decode16 0b0000001000000001 = Builder.text "TC"
+decode16 0b0000001000000010 = Builder.text "TT"
+decode16 0b0000001000000011 = Builder.text "TG"
+decode16 0b0000001100000000 = Builder.text "GA"
+decode16 0b0000001100000001 = Builder.text "GC"
+decode16 0b0000001100000010 = Builder.text "GT"
+decode16 0b0000001100000011 = Builder.text "GG"
+decode16 n                  = error $ "decode16: unexpected bits: " <> show n
 
 {-# INLINE writeCount #-}
 writeCount :: Storable.Vector Word8 -> ByteString -> IO Builder.Builder
@@ -213,7 +213,6 @@ tcalculateF input size = do
       $ foldl' (\ !acc !hm -> HashMap.unionWith (+) acc hm) HashMap.empty results
 
 
-
 calculateF :: Storable.Vector Word8 -> Int -> Int -> Int -> IO (HashMap Incremental Int)
 calculateF input !beg !size !incr = do
     let
@@ -228,7 +227,6 @@ calculateF input !beg !size !incr = do
                 let freqmap' = Internal.insertNewKey (fromIntegral (hash word)) word ref freqmap
                 pure freqmap'
               Just x -> modifyIORef' x (+1) >> pure freqmap
-      {-# INLINE calculate' #-}
       calculate' :: HashMap Incremental (IORef Int) -> Int -> IO (HashMap Incremental (IORef Int))
       calculate' freqmap i
             | i >= ((Storable.length input)+1 - size) = return freqmap
@@ -242,7 +240,7 @@ calculateF input !beg !size !incr = do
 instance Hashable Incremental where
   hash (Incremental v) =
     Storable.foldl'
-    (\ acc w -> (acc `shiftL` 2) .|. (fromIntegral w))-- .&. 0b110))
+    (\ acc w -> (acc `shiftL` 2) .|. (fromIntegral w))
     0
     v
   hashWithSalt _ = hash
